@@ -1,133 +1,115 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>GPS Logger Map</title>
+    <title>Secure GPS Tracker</title>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- Leaflet CSS for map styling -->
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #f4f4f4; }
-        .header { padding: 15px; background: #222; color: #fff; text-align: center; }
-        #map { height: 70vh; width: 100%; }
-        .no-data { text-align: center; padding: 80px; font-size: 1.4em; color: #666; }
-        .list-container { padding: 15px; background: #fff; max-height: 20vh; overflow-y: auto; border-top: 1px solid #ddd; }
-        .list-container ul { margin: 0; padding-left: 20px; }
-        .list-container li { font-size: 0.9em; margin-bottom: 5px; }
-        
-        /* Simple PIN lock overlay */
-        #lockScreen { position: fixed; top:0; left:0; width:100%; height:100%; background:#111; color:#fff; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:9999; }
-        #lockScreen input { padding: 10px; font-size: 1.2em; margin-bottom: 10px; border-radius: 5px; border: none; text-align: center; }
+        body { font-family: Arial, sans-serif; margin: 0; padding: 0; background: #111; color: #fff; }
+        #lockScreen { position: fixed; top:0; left:0; width:100%; height:100%; background:#111; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:9999; }
+        #lockScreen input { padding: 12px; font-size: 1.2em; margin-bottom: 10px; border-radius: 5px; border: none; text-align: center; }
         #lockScreen button { padding: 10px 20px; font-size: 1.1em; background: #0066ff; color: #fff; border: none; border-radius: 5px; cursor: pointer; }
+        #map { height: 80vh; width: 100%; }
+        .header { padding: 15px; background: #222; text-align: center; }
     </style>
 </head>
 <body>
 
-    <!-- PIN Lock Screen to keep it private -->
+    <!-- Passkey Prompt Overlay -->
     <div id="lockScreen">
-        <h3>Enter Access PIN</h3>
-        <input type="password" id="pinInput" placeholder="PIN">
-        <button onclick="checkPin()">Unlock</button>
+        <h3>Enter Passkey</h3>
+        <input type="password" id="passkeyInput" placeholder="Passkey">
+        <button onclick="unlockAndDecrypt()">Access Map</button>
     </div>
 
     <div class="header">
-        <h2>GPS Tracking Dashboard</h2>
+        <h2>Secure Status Dashboard</h2>
     </div>
 
     <div id="appContent" style="display:none;">
-        <div id="noDataMsg" class="no-data" style="display:none;">No data available yet.</div>
-        
-        <!-- Interactive Map Container -->
         <div id="map"></div>
-
-        <!-- Fallback List & Direct Links -->
-        <div class="list-container">
-            <strong>Recent Coordinate Log (Newest First):</strong>
-            <ul id="locationList"></ul>
-        </div>
     </div>
 
-    <!-- Leaflet JS Library -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
-        // Set your secret PIN code here
-        const CORRECT_PIN = "1234";
+        async function unlockAndDecrypt() {
+            const passkey = document.getElementById('passkeyInput').value;
+            if (!passkey) return alert('Enter a passkey');
 
-        function checkPin() {
-            const entered = document.getElementById('pinInput').value;
-            if (entered === CORRECT_PIN) {
+            try {
+                // Fetch encrypted location blob from GitHub Pages
+                const response = await fetch('location.json?t=' + Date.now());
+                if (!response.ok) throw new Error("Data not found");
+                const encryptedArray = await response.json();
+
+                let validLocations = [];
+
+                // Loop through stored encrypted entries
+                for (let cipherBase64 of encryptedArray) {
+                    try {
+                        let decryptedText = await decryptWithPasskey(cipherBase64, passkey);
+                        
+                        // Validate header check ("OK|")
+                        if (decryptedText && decryptedText.startsWith("OK|")) {
+                            let parts = decryptedText.substring(3).split('|');
+                            let coords = parts[0].split(',');
+                            let lat = parseFloat(coords[0]);
+                            let lng = parseFloat(coords[1]);
+                            
+                            if (!isNaN(lat) && !isNaN(lng)) {
+                                validLocations.push([lat, lng]);
+                            }
+                        }
+                    } catch (err) {
+                        // Decryption failed (wrong passkey or corrupt data) - silently discard
+                    }
+                }
+
+                if (validLocations.length === 0) {
+                    alert('Incorrect passkey or no valid records found.');
+                    return;
+                }
+
+                // Unlock UI and initialize map
                 document.getElementById('lockScreen').style.display = 'none';
                 document.getElementById('appContent').style.display = 'block';
-                loadMapData();
-            } else {
-                alert('Incorrect PIN');
+                initMap(validLocations);
+
+            } catch (e) {
+                alert('Error loading data: ' + e.message);
             }
         }
 
-        function loadMapData() {
-            // Fetch your coordinate history file (e.g., location.json) from the repo
-            fetch('location.json?t=' + new Date().getTime()) // Prevent caching
-                .then(response => {
-                    if (!response.ok) throw new Error("No data found");
-                    return response.json();
-                })
-                .then(data => {
-                    // Expecting data format: an array of [lat, lng] pairs or objects
-                    let locations = data; 
-                    if (!Array.isArray(locations) || locations.length === 0) {
-                        document.getElementById('noDataMsg').style.display = 'block';
-                        document.getElementById('map').style.display = 'none';
-                        return;
-                    }
+        // Browser Web Crypto API helper for AES decryption
+        async function decryptWithPasskey(base64Cipher, passkey) {
+            const enc = new TextEncoder();
+            const keyMaterial = await window.crypto.subtle.importKey(
+                "raw", enc.encode(passkey.padEnd(32, '0').substring(0, 32)), { name: "AES-CBC" }, false, ["decrypt"]
+            );
+            
+            const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
+            // Assuming standard IV handling or simple ECB/CBC setup matching Java
+            // (Using raw decode here)
+            const decrypted = await window.crypto.subtle.decrypt(
+                { name: "AES-CBC", iv: new Uint8Array(16) }, // Match IV config with Java side
+                keyMaterial,
+                rawData
+            );
+            return new TextDecoder().decode(decrypted);
+        }
 
-                    // Initialize Map
-                    var map = L.map('map').setView(locations[0], 15);
-                    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                        maxZoom: 19,
-                        attribution: '&copy; OpenStreetMap contributors'
-                    }).addTo(map);
+        function initMap(locations) {
+            var map = L.map('map').setView(locations[0], 15);
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                maxZoom: 19,
+                attribution: '&copy; OpenStreetMap contributors'
+            }).addTo(map);
 
-                    var latLngs = [];
-                    var listElement = document.getElementById('locationList');
-
-                    locations.forEach(function(coord, index) {
-                        let lat = coord[0];
-                        let lng = coord[1];
-                        latLngs.push([lat, lng]);
-
-                        // Drop Marker
-                        var marker = L.marker([lat, lng]).addTo(map);
-                        if (index === 0) {
-                            marker.bindPopup("<b>Most Recent Location</b>").openPopup();
-                        } else {
-                            marker.bindPopup("Location #" + (index + 1));
-                        }
-
-                        // Populate List
-                        var li = document.createElement('li');
-                        var a = document.createElement('a');
-                        a.href = `https://www.openstreetmap.org/?mlat=${lat}&mlon=${lng}#map=16/${lat}/${lng}`;
-                        a.target = "_blank";
-                        a.textContent = `${lat}, ${lng}`;
-                        li.appendChild(a);
-
-                        if (index === 0) {
-                            var bold = document.createElement('strong');
-                            bold.textContent = " (Latest)";
-                            li.appendChild(bold);
-                        }
-                        listElement.appendChild(li);
-                    });
-
-                    // Draw Path Polyline
-                    var polyline = L.polyline(latLngs, {color: '#0066ff', weight: 4}).addTo(map);
-                    map.fitBounds(polyline.getBounds(), {padding: [50, 50]});
-                })
-                .catch(error => {
-                    console.error("Error loading location data:", error);
-                    document.getElementById('noDataMsg').style.display = 'block';
-                    document.getElementById('map').style.display = 'none';
-                });
+            locations.forEach(function(coord, index) {
+                var marker = L.marker(coord).addTo(map);
+                if (index === 0) marker.bindPopup("<b>Latest Position</b>").openPopup();
+            });
         }
     </script>
 </body>
