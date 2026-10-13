@@ -11,8 +11,18 @@
         #lockScreen { position: fixed; top:0; left:0; width:100%; height:100%; background:#111; display:flex; flex-direction:column; align-items:center; justify-content:center; z-index:9999; }
         #lockScreen input { padding: 12px; font-size: 1.2em; margin-bottom: 10px; border-radius: 5px; border: none; text-align: center; width: 80%; max-width: 300px; }
         #lockScreen button { padding: 10px 20px; font-size: 1.1em; background: #0066ff; color: #fff; border: none; border-radius: 5px; cursor: pointer; }
-        #map { height: 80vh; width: 100%; }
         .header { padding: 15px; background: #222; text-align: center; }
+        #controls { padding: 10px 15px; background: #1e1e1e; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #333; }
+        #controls label { cursor: pointer; font-size: 0.95em; }
+        #map { height: 55vh; width: 100%; }
+        #detailsPanel { height: 30vh; overflow-y: auto; background: #181818; padding: 15px; box-sizing: border-box; border-top: 2px solid #333; }
+        #detailsPanel h3 { margin-top: 0; margin-bottom: 10px; font-size: 1.1em; color: #0066ff; }
+        .cluster-card { background: #242424; margin-bottom: 10px; padding: 10px 12px; border-radius: 6px; border-left: 4px solid #0066ff; cursor: pointer; transition: background 0.2s; }
+        .cluster-card:hover { background: #333; }
+        .cluster-header { display: flex; justify-content: space-between; align-items: center; font-weight: bold; font-size: 0.95em; }
+        .cluster-coords { color: #888; font-size: 0.85em; font-family: monospace; }
+        .cluster-visits { margin-top: 6px; font-size: 0.85em; color: #ccc; line-height: 1.4; }
+        .visit-badge { background: #333; padding: 2px 6px; border-radius: 4px; display: inline-block; margin: 2px 2px 2px 0; }
     </style>
 </head>
 <body>
@@ -29,93 +39,304 @@
     </div>
 
     <div id="appContent" style="display:none;">
+        <div id="controls">
+            <span><strong id="summaryStats">0 Location Clusters</strong></span>
+            <label>
+                <input type="checkbox" id="pathToggle" onchange="togglePathLine()" checked>
+                Draw Timeline Path (Fades older &rarr; recent)
+            </label>
+        </div>
         <div id="map"></div>
+        <div id="detailsPanel">
+            <h3>Location Visit History</h3>
+            <div id="clusterList"></div>
+        </div>
     </div>
 
     <!-- Leaflet JS -->
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        let mapInstance = null;
+        let markersMap = {};
+        let pathPolylineGroup = null;
+        let globalRawLocations = [];
+        let globalClusters = [];
+
         async function unlockAndDecrypt() {
             const passkey = document.getElementById('passkeyInput').value;
-            if (!passkey) return alert('Enter a passkey');
+            if (!passkey) return alert('bad pass');
 
             try {
-                // Fetch encrypted location blob from GitHub Pages
+                // Fetch encrypted location blob
                 const response = await fetch('location.json?t=' + Date.now());
                 if (!response.ok) throw new Error("Data not found");
                 const encryptedArray = await response.json();
 
                 let validLocations = [];
 
-                // Loop through stored encrypted entries to find any valid decodes
+                // Loop through stored encrypted entries
                 for (let cipherBase64 of encryptedArray) {
                     try {
                         let decryptedText = await decryptWithPasskey(cipherBase64, passkey);
                         
-                        // Validate header check ("OK|")
+                        // Validate header check (exact "OK|")
                         if (decryptedText && decryptedText.startsWith("OK|")) {
                             let parts = decryptedText.substring(3).split('|');
                             let coords = parts[0].split(',');
                             let lat = parseFloat(coords[0]);
                             let lng = parseFloat(coords[1]);
+                            let timestamp = parts[1] || "Unknown Time";
                             
                             if (!isNaN(lat) && !isNaN(lng)) {
-                                validLocations.push([lat, lng]);
+                                validLocations.push({
+                                    lat: lat,
+                                    lng: lng,
+                                    time: timestamp,
+                                    dateObj: parseDate(timestamp)
+                                });
                             }
                         }
                     } catch (err) {
-                        // Decryption failed for this specific row (wrong passkey) - silently discard
+                        // Decryption failed for this row - silently discard
                     }
                 }
 
                 if (validLocations.length === 0) {
-                    alert('Incorrect passkey or no valid records found.');
+                    alert('bad pass');
                     return;
                 }
+
+                // Sort chronologically (oldest to newest)
+                validLocations.sort((a, b) => a.dateObj - b.dateObj);
+                globalRawLocations = validLocations;
 
                 // Unlock UI and initialize map
                 document.getElementById('lockScreen').style.display = 'none';
                 document.getElementById('appContent').style.display = 'block';
-                initMap(validLocations);
+                initMapAndDashboard(validLocations);
 
             } catch (e) {
-                alert('Error loading data: ' + e.message);
+                alert('bad pass');
             }
         }
 
-        // Browser Web Crypto API helper for AES decryption matching the Java app
-async function decryptWithPasskey(base64Cipher, passkey) {
-    const enc = new TextEncoder();
-    
-    // Match Java's exact 32-byte zero-padding key generation
-    const paddedKey = passkey.padEnd(32, '0').substring(0, 32);
-    const keyMaterial = await window.crypto.subtle.importKey(
-        "raw", enc.encode(paddedKey), { name: "AES-CBC" }, false, ["decrypt"]
-    );
-    
-    const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
-    
-    // Java uses a static 16-byte zero IV, so pass a 16-byte zero array and use all of rawData as ciphertext[cite: 1]
-    const iv = new Uint8Array(16);
+        function parseDate(ts) {
+            let d = new Date(ts);
+            if (isNaN(d.getTime())) {
+                return new Date(0);
+            }
+            return d;
+        }
 
-    const decrypted = await window.crypto.subtle.decrypt(
-        { name: "AES-CBC", iv: iv }, 
-        keyMaterial,
-        rawData
-    );
-    return new TextDecoder().decode(decrypted);
-}
-        function initMap(locations) {
-            var map = L.map('map').setView(locations[0], 15);
-            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-                maxZoom: 19,
-                attribution: '&copy; OpenStreetMap contributors'
-            }).addTo(map);
+        // Distance in meters between two lat/lng points (Haversine formula)
+        function getDistanceMeters(lat1, lon1, lat2, lon2) {
+            const R = 6371000; // Radius of the Earth in meters
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLon/2) * Math.sin(dLon/2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+            return R * c;
+        }
 
-            locations.forEach(function(coord, index) {
-                var marker = L.marker(coord).addTo(map);
-                if (index === 0) marker.bindPopup("<b>Latest Position</b>").openPopup();
+        // Browser Web Crypto API helper for AES decryption matching Java app
+        async function decryptWithPasskey(base64Cipher, passkey) {
+            const enc = new TextEncoder();
+
+            const keyBytes = new Uint8Array(32);
+            const passkeyEncoded = enc.encode(passkey);
+            keyBytes.set(passkeyEncoded.subarray(0, 32));
+
+            const keyMaterial = await window.crypto.subtle.importKey(
+                "raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]
+            );
+
+            const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
+            const iv = new Uint8Array(16);
+
+            const decrypted = await window.crypto.subtle.decrypt(
+                { name: "AES-CBC", iv: iv },
+                keyMaterial,
+                rawData
+            );
+            return new TextDecoder().decode(decrypted);
+        }
+
+        function groupLocationsIntoClusters(locations, thresholdMeters = 100) {
+            let clusters = [];
+
+            locations.forEach(loc => {
+                let foundCluster = null;
+                for (let cluster of clusters) {
+                    let dist = getDistanceMeters(loc.lat, loc.lng, cluster.lat, cluster.lng);
+                    if (dist <= thresholdMeters) {
+                        foundCluster = cluster;
+                        break;
+                    }
+                }
+
+                if (foundCluster) {
+                    foundCluster.points.push(loc);
+                    // Recalculate average coordinates
+                    let sumLat = 0, sumLng = 0;
+                    foundCluster.points.forEach(p => { sumLat += p.lat; sumLng += p.lng; });
+                    foundCluster.lat = sumLat / foundCluster.points.length;
+                    foundCluster.lng = sumLng / foundCluster.points.length;
+                } else {
+                    clusters.push({
+                        id: clusters.length + 1,
+                        lat: loc.lat,
+                        lng: loc.lng,
+                        points: [loc]
+                    });
+                }
             });
+
+            // For each cluster, build visit time ranges
+            clusters.forEach(cluster => {
+                cluster.points.sort((a, b) => a.dateObj - b.dateObj);
+                cluster.latestPoint = cluster.points[cluster.points.length - 1];
+                cluster.visits = buildVisitRanges(cluster.points);
+            });
+
+            // Sort clusters by latest visit date descending
+            clusters.sort((a, b) => b.latestPoint.dateObj - a.latestPoint.dateObj);
+
+            return clusters;
+        }
+
+        function buildVisitRanges(points) {
+            if (points.length === 0) return [];
+            let visits = [];
+            let currentStart = points[0];
+            let currentEnd = points[0];
+
+            for (let i = 1; i < points.length; i++) {
+                let p = points[i];
+                // If within 30 minutes, extend stay
+                if ((p.dateObj - currentEnd.dateObj) <= 30 * 60 * 1000) {
+                    currentEnd = p;
+                } else {
+                    visits.push(formatRange(currentStart, currentEnd));
+                    currentStart = p;
+                    currentEnd = p;
+                }
+            }
+            visits.push(formatRange(currentStart, currentEnd));
+            return visits;
+        }
+
+        function formatRange(startPoint, endPoint) {
+            if (startPoint.time === endPoint.time || (endPoint.dateObj - startPoint.dateObj) < 60000) {
+                return startPoint.time;
+            }
+            return startPoint.time + " - " + endPoint.time;
+        }
+
+        function initMapAndDashboard(locations) {
+            const clusters = groupLocationsIntoClusters(locations, 100);
+            globalClusters = clusters;
+
+            document.getElementById('summaryStats').innerText = clusters.length + " Clusters (" + locations.length + " Total Logs)";
+
+            if (!mapInstance) {
+                mapInstance = L.map('map').setView([clusters[0].lat, clusters[0].lng], 14);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                    maxZoom: 19,
+                    attribution: '&copy; OpenStreetMap contributors'
+                }).addTo(mapInstance);
+            } else {
+                mapInstance.setView([clusters[0].lat, clusters[0].lng], 14);
+            }
+
+            markersMap = {};
+
+            clusters.forEach((cluster, index) => {
+                let isLatest = (index === 0);
+                let popupText = "<b>Spot #" + cluster.id + "</b><br>" +
+                                "<b>Coords:</b> " + cluster.lat.toFixed(5) + ", " + cluster.lng.toFixed(5) + "<br>" +
+                                "<b>Latest:</b> " + cluster.latestPoint.time;
+
+                let marker = L.marker([cluster.lat, cluster.lng]).addTo(mapInstance);
+                marker.bindPopup(popupText);
+                if (isLatest) marker.openPopup();
+
+                markersMap[cluster.id] = marker;
+            });
+
+            renderDetailsPanel(clusters);
+            drawTimelinePath();
+        }
+
+        function renderDetailsPanel(clusters) {
+            const listEl = document.getElementById('clusterList');
+            listEl.innerHTML = '';
+
+            clusters.forEach((cluster) => {
+                let card = document.createElement('div');
+                card.className = 'cluster-card';
+                card.onclick = () => focusClusterOnMap(cluster.id);
+
+                let header = document.createElement('div');
+                header.className = 'cluster-header';
+                header.innerHTML = '<span>Spot #' + cluster.id + ' (' + cluster.points.length + ' logs)</span>' +
+                                   '<span style="font-weight:normal; font-size:0.85em; color:#0066ff;">View on Map &rarr;</span>';
+
+                let coords = document.createElement('div');
+                coords.className = 'cluster-coords';
+                coords.innerText = 'Coords: ' + cluster.lat.toFixed(5) + ', ' + cluster.lng.toFixed(5);
+
+                let visits = document.createElement('div');
+                visits.className = 'cluster-visits';
+                visits.innerHTML = '<strong>Visits:</strong><br>' +
+                    cluster.visits.map(v => '<span class="visit-badge">' + v + '</span>').join(' ');
+
+                card.appendChild(header);
+                card.appendChild(coords);
+                card.appendChild(visits);
+                listEl.appendChild(card);
+            });
+        }
+
+        function focusClusterOnMap(clusterId) {
+            let marker = markersMap[clusterId];
+            if (marker && mapInstance) {
+                mapInstance.setView(marker.getLatLng(), 16);
+                marker.openPopup();
+            }
+        }
+
+        function drawTimelinePath() {
+            if (pathPolylineGroup) {
+                mapInstance.removeLayer(pathPolylineGroup);
+                pathPolylineGroup = null;
+            }
+
+            const checkbox = document.getElementById('pathToggle');
+            if (!checkbox.checked || globalRawLocations.length < 2) return;
+
+            pathPolylineGroup = L.layerGroup().addTo(mapInstance);
+
+            const count = globalRawLocations.length;
+            for (let i = 0; i < count - 1; i++) {
+                let p1 = globalRawLocations[i];
+                let p2 = globalRawLocations[i + 1];
+
+                // Opacity fades from 0.15 (oldest) to 0.95 (newest)
+                let opacity = 0.15 + 0.8 * (i / (count - 1));
+
+                let polyline = L.polyline([[p1.lat, p1.lng], [p2.lat, p2.lng]], {
+                    color: 'red',
+                    weight: 3,
+                    opacity: opacity
+                });
+                pathPolylineGroup.addLayer(polyline);
+            }
+        }
+
+        function togglePathLine() {
+            drawTimelinePath();
         }
     </script>
 </body>
