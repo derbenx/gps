@@ -254,7 +254,7 @@ int pad = 40;
 
             JSONArray updatedArray = new JSONArray();
             updatedArray.put(encryptedPayload);
-            for (int i = 0; i < existingArray.length(); i++) {
+            for (int i = 0; i < existingArray.length() && updatedArray.length() < 2000; i++) {
                 updatedArray.put(existingArray.get(i));
             }
 
