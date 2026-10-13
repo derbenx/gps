@@ -6,6 +6,8 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.location.Location;
+import android.location.LocationManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.util.Base64;
@@ -221,9 +223,31 @@ int pad = 40;
                 return;
             }
 
-            // Use dummy test coordinates (e.g., 0.0, 0.0) with a test tag
+            double lat = 0.0;
+            double lng = 0.0;
+
+            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+                LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+                if (lm != null) {
+                    Location loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                    if (loc == null) {
+                        loc = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+                    }
+                    if (loc != null) {
+                        lat = loc.getLatitude();
+                        lng = loc.getLongitude();
+                    }
+                }
+            }
+
+            // Fallback to randomized coordinates around San Francisco if location unavailable
+            if (lat == 0.0 && lng == 0.0) {
+                lat = 37.7749 + (Math.random() - 0.5) * 0.02;
+                lng = -122.4194 + (Math.random() - 0.5) * 0.02;
+            }
+
             String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
-            String rawData = "OK|0.0000,0.0000|TEST-" + timestamp;
+            String rawData = String.format(Locale.US, "OK|%.6f,%.6f|TEST-%s", lat, lng, timestamp);
 
             String encryptedPayload = encryptWithPasskey(rawData, passkey);
             String apiUrl = "https://api.github.com/repos/" + repo + "/contents/location.json";
