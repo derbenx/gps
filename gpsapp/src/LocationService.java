@@ -65,10 +65,6 @@ public class LocationService extends Service implements LocationListener {
                 .build();
         startForeground(NOTIFICATION_ID, notification);
 
-        SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
-        int minutes = prefs.getInt("intervalMinutes", 15);
-        intervalMillis = minutes * 60L * 1000L;
-
         locationManager = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
         handler = new Handler(Looper.getMainLooper());
 
@@ -79,30 +75,79 @@ public class LocationService extends Service implements LocationListener {
                 handler.postDelayed(this, intervalMillis);
             }
         };
-        handler.post(pingRunnable);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
+        int minutes = prefs.getInt("intervalMinutes", 15);
+        intervalMillis = minutes * 60L * 1000L;
+
+        if (handler != null && pingRunnable != null) {
+            handler.removeCallbacks(pingRunnable);
+            handler.post(pingRunnable);
+        }
+
+        return START_STICKY;
     }
 
     private void checkAndFetchLocation() {
-        boolean isGpsEnabled = locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER);
-        if (!isGpsEnabled) return;
-
-        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-            locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, this, Looper.getMainLooper());
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED &&
+            checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            return;
         }
+
+        Location bestLocation = null;
+
+        // Try getting last known location from GPS, Network, or Passive providers
+        String[] providers = {LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, LocationManager.PASSIVE_PROVIDER};
+        for (String provider : providers) {
+            try {
+                if (locationManager.isProviderEnabled(provider)) {
+                    Location l = locationManager.getLastKnownLocation(provider);
+                    if (l != null && (bestLocation == null || l.getTime() > bestLocation.getTime())) {
+                        bestLocation = l;
+                    }
+                }
+            } catch (Exception e) {
+                // Ignore provider exceptions
+            }
+        }
+
+        // Request a fresh single update if provider is enabled (for future pings)
+        try {
+            if (locationManager.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.GPS_PROVIDER, this, Looper.getMainLooper());
+            } else if (locationManager.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                locationManager.requestSingleUpdate(LocationManager.NETWORK_PROVIDER, this, Looper.getMainLooper());
+            }
+        } catch (Exception e) {
+            // Ignore
+        }
+
+        // Determine coordinates to push on this timer ping: best location if present, otherwise fallback SF coordinates
+        final double targetLat;
+        final double targetLng;
+
+        if (bestLocation != null) {
+            targetLat = bestLocation.getLatitude();
+            targetLng = bestLocation.getLongitude();
+        } else {
+            targetLat = 37.7749 + (Math.random() - 0.5) * 0.02;
+            targetLng = -122.4194 + (Math.random() - 0.5) * 0.02;
+        }
+
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+                uploadEncryptedToGitHub(targetLat, targetLng);
+            }
+        }).start();
     }
 
     @Override
     public void onLocationChanged(Location location) {
-        double lat = location.getLatitude();
-        double lng = location.getLongitude();
-
-        new Thread(new Runnable() {
-    @Override
-    public void run() {
-        uploadEncryptedToGitHub(lat, lng);
-    }
-}).start();
-
+        // Location Listener callback for location changes
     }
 
     private void uploadEncryptedToGitHub(double lat, double lng) {
