@@ -151,29 +151,50 @@ public class LocationService extends Service implements LocationListener {
     }
 
     private void uploadEncryptedToGitHub(double lat, double lng) {
+        SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
+        String repo = prefs.getString("repo", "");
+        String token = prefs.getString("token", "");
+        String passkey = prefs.getString("passkey", "");
+
+        if (repo.isEmpty() || token.isEmpty() || passkey.isEmpty()) return;
+
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+        String rawData = "OK|" + lat + "," + lng + "|" + timestamp;
+
+        String newEncryptedPayload = null;
         try {
-            SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
-            String repo = prefs.getString("repo", "");
-            String token = prefs.getString("token", "");
-            String passkey = prefs.getString("passkey", "");
+            newEncryptedPayload = encryptWithPasskey(rawData, passkey);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
+        }
 
-            if (repo.isEmpty() || token.isEmpty() || passkey.isEmpty()) return;
+        // Retrieve existing offline pending queue
+        JSONArray pendingQueue = new JSONArray();
+        String cachedPendingJson = prefs.getString("pending_payloads", "[]");
+        try {
+            pendingQueue = new JSONArray(cachedPendingJson);
+        } catch (Exception ignored) {}
 
-            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
-            String rawData = "OK|" + lat + "," + lng + "|" + timestamp;
+        // Add new payload to pending queue
+        pendingQueue.put(newEncryptedPayload);
 
-            String encryptedPayload = encryptWithPasskey(rawData, passkey);
+        boolean uploadSuccess = false;
+        try {
             String apiUrl = "https://api.github.com/repos/" + repo + "/contents/location.json";
 
             String existingSha = null;
             JSONArray existingArray = new JSONArray();
 
             HttpURLConnection getConn = (HttpURLConnection) new URL(apiUrl).openConnection();
+            getConn.setConnectTimeout(10000);
+            getConn.setReadTimeout(10000);
             getConn.setRequestMethod("GET");
             getConn.setRequestProperty("Authorization", "Bearer " + token);
             getConn.setRequestProperty("User-Agent", "Android-GPS-Logger-Service");
 
-            if (getConn.getResponseCode() == 200) {
+            int getCode = getConn.getResponseCode();
+            if (getCode == 200) {
                 BufferedReader reader = new BufferedReader(new InputStreamReader(getConn.getInputStream(), StandardCharsets.UTF_8));
                 StringBuilder sb = new StringBuilder();
                 String line;
@@ -189,8 +210,13 @@ public class LocationService extends Service implements LocationListener {
             }
             getConn.disconnect();
 
+            // Prepend all items from the pending queue (newest to oldest)
             JSONArray updatedArray = new JSONArray();
-            updatedArray.put(encryptedPayload);
+            for (int i = pendingQueue.length() - 1; i >= 0; i--) {
+                if (updatedArray.length() < 2000) {
+                    updatedArray.put(pendingQueue.get(i));
+                }
+            }
             for (int i = 0; i < existingArray.length() && updatedArray.length() < 2000; i++) {
                 updatedArray.put(existingArray.get(i));
             }
@@ -198,13 +224,15 @@ public class LocationService extends Service implements LocationListener {
             String newContentBase64 = Base64.encodeToString(updatedArray.toString().getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
             JSONObject putBody = new JSONObject();
-            putBody.put("message", "Auto-update GPS log: " + timestamp);
+            putBody.put("message", "Auto-update GPS log: " + timestamp + " (" + pendingQueue.length() + " items)");
             putBody.put("content", newContentBase64);
             if (existingSha != null) {
                 putBody.put("sha", existingSha);
             }
 
             HttpURLConnection putConn = (HttpURLConnection) new URL(apiUrl).openConnection();
+            putConn.setConnectTimeout(10000);
+            putConn.setReadTimeout(10000);
             putConn.setRequestMethod("PUT");
             putConn.setRequestProperty("Authorization", "Bearer " + token);
             putConn.setRequestProperty("Content-Type", "application/json");
@@ -216,11 +244,24 @@ public class LocationService extends Service implements LocationListener {
                 os.write(input, 0, input.length);
             }
 
-            putConn.getResponseCode();
+            int putCode = putConn.getResponseCode();
             putConn.disconnect();
+
+            if (putCode == 200 || putCode == 201) {
+                uploadSuccess = true;
+            }
 
         } catch (Exception e) {
             e.printStackTrace();
+            uploadSuccess = false;
+        }
+
+        if (uploadSuccess) {
+            // Upload succeeded, clear the pending offline queue
+            prefs.edit().putString("pending_payloads", "[]").apply();
+        } else {
+            // Upload failed (e.g. no internet/server error), persist updated pending queue
+            prefs.edit().putString("pending_payloads", pendingQueue.toString()).apply();
         }
     }
 

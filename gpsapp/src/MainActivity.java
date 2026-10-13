@@ -207,55 +207,77 @@ int pad = 40;
     }
 
     private void testGitHubConnection() {
-        try {
-            SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
-            String repo = prefs.getString("repo", "");
-            String token = prefs.getString("token", "");
-            String passkey = prefs.getString("passkey", "");
+        SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+        String repo = prefs.getString("repo", "");
+        String token = prefs.getString("token", "");
+        String passkey = prefs.getString("passkey", "");
 
-            if (repo.isEmpty() || token.isEmpty() || passkey.isEmpty()) {
-                runOnUiThread(new Runnable() {
-                    @Override
-                    public void run() {
-                        textStatus.setText("Error: Fill out repo, token, and passkey first.");
-                    }
-                });
-                return;
-            }
+        if (repo.isEmpty() || token.isEmpty() || passkey.isEmpty()) {
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    textStatus.setText("Error: Fill out repo, token, and passkey first.");
+                }
+            });
+            return;
+        }
 
-            double lat = 0.0;
-            double lng = 0.0;
+        double lat = 0.0;
+        double lng = 0.0;
 
-            if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
-                LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
-                if (lm != null) {
-                    Location loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
-                    if (loc == null) {
-                        loc = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
-                    }
-                    if (loc != null) {
-                        lat = loc.getLatitude();
-                        lng = loc.getLongitude();
-                    }
+        if (checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED) {
+            LocationManager lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+            if (lm != null) {
+                Location loc = lm.getLastKnownLocation(LocationManager.GPS_PROVIDER);
+                if (loc == null) {
+                    loc = lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER);
+                }
+                if (loc != null) {
+                    lat = loc.getLatitude();
+                    lng = loc.getLongitude();
                 }
             }
+        }
 
-            // Fallback to randomized coordinates around San Francisco if location unavailable
-            if (lat == 0.0 && lng == 0.0) {
-                lat = 37.7749 + (Math.random() - 0.5) * 0.02;
-                lng = -122.4194 + (Math.random() - 0.5) * 0.02;
-            }
+        // Fallback to randomized coordinates around San Francisco if location unavailable
+        if (lat == 0.0 && lng == 0.0) {
+            lat = 37.7749 + (Math.random() - 0.5) * 0.02;
+            lng = -122.4194 + (Math.random() - 0.5) * 0.02;
+        }
 
-            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
-            String rawData = String.format(Locale.US, "OK|%.6f,%.6f|TEST-%s", lat, lng, timestamp);
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+        String rawData = String.format(Locale.US, "OK|%.6f,%.6f|TEST-%s", lat, lng, timestamp);
 
-            String encryptedPayload = encryptWithPasskey(rawData, passkey);
+        String newEncryptedPayload = null;
+        try {
+            newEncryptedPayload = encryptWithPasskey(rawData, passkey);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
+        }
+
+        // Retrieve existing offline pending queue
+        JSONArray pendingQueue = new JSONArray();
+        String cachedPendingJson = prefs.getString("pending_payloads", "[]");
+        try {
+            pendingQueue = new JSONArray(cachedPendingJson);
+        } catch (Exception ignored) {}
+
+        // Add new payload to pending queue
+        pendingQueue.put(newEncryptedPayload);
+
+        int responseCode = -1;
+        boolean uploadSuccess = false;
+
+        try {
             String apiUrl = "https://api.github.com/repos/" + repo + "/contents/location.json";
 
             String existingSha = null;
             JSONArray existingArray = new JSONArray();
 
             HttpURLConnection getConn = (HttpURLConnection) new URL(apiUrl).openConnection();
+            getConn.setConnectTimeout(10000);
+            getConn.setReadTimeout(10000);
             getConn.setRequestMethod("GET");
             getConn.setRequestProperty("Authorization", "Bearer " + token);
             getConn.setRequestProperty("User-Agent", "Android-GPS-Logger-Test");
@@ -276,8 +298,13 @@ int pad = 40;
             }
             getConn.disconnect();
 
+            // Prepend all items from the pending queue (newest to oldest)
             JSONArray updatedArray = new JSONArray();
-            updatedArray.put(encryptedPayload);
+            for (int i = pendingQueue.length() - 1; i >= 0; i--) {
+                if (updatedArray.length() < 2000) {
+                    updatedArray.put(pendingQueue.get(i));
+                }
+            }
             for (int i = 0; i < existingArray.length() && updatedArray.length() < 2000; i++) {
                 updatedArray.put(existingArray.get(i));
             }
@@ -285,13 +312,15 @@ int pad = 40;
             String newContentBase64 = Base64.encodeToString(updatedArray.toString().getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
 
             JSONObject putBody = new JSONObject();
-            putBody.put("message", "Test connection ping: " + timestamp);
+            putBody.put("message", "Test connection ping: " + timestamp + " (" + pendingQueue.length() + " items)");
             putBody.put("content", newContentBase64);
             if (existingSha != null) {
                 putBody.put("sha", existingSha);
             }
 
             HttpURLConnection putConn = (HttpURLConnection) new URL(apiUrl).openConnection();
+            putConn.setConnectTimeout(10000);
+            putConn.setReadTimeout(10000);
             putConn.setRequestMethod("PUT");
             putConn.setRequestProperty("Authorization", "Bearer " + token);
             putConn.setRequestProperty("Content-Type", "application/json");
@@ -303,26 +332,36 @@ int pad = 40;
                 os.write(input, 0, input.length);
             }
 
-            int responseCode = putConn.getResponseCode();
+            responseCode = putConn.getResponseCode();
             putConn.disconnect();
 
-            runOnUiThread(new Runnable() {
-                @Override
-                public void run() {
-                    if (responseCode == 200 || responseCode == 201) {
-                        textStatus.setText("Test Success! Check your web map.");
-                    } else {
-                        textStatus.setText("Failed! GitHub API code: " + responseCode);
-                    }
-                }
-            });
+            if (responseCode == 200 || responseCode == 201) {
+                uploadSuccess = true;
+            }
 
         } catch (final Exception e) {
             e.printStackTrace();
+            uploadSuccess = false;
+        }
+
+        if (uploadSuccess) {
+            // Upload succeeded, clear the pending queue
+            prefs.edit().putString("pending_payloads", "[]").apply();
+            final int finalCode = responseCode;
             runOnUiThread(new Runnable() {
                 @Override
                 public void run() {
-                    textStatus.setText("Test Error: " + e.getMessage());
+                    textStatus.setText("Test Success! Flushed queue & synced map.");
+                }
+            });
+        } else {
+            // Upload failed, persist updated queue locally
+            prefs.edit().putString("pending_payloads", pendingQueue.toString()).apply();
+            final int finalQueueCount = pendingQueue.length();
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    textStatus.setText("Offline/Error! Cached point locally (" + finalQueueCount + " pending)");
                 }
             });
         }
