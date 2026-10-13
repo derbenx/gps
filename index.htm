@@ -217,7 +217,7 @@
             return R * c;
         }
 
-        // Browser Web Crypto API helper for AES decryption using 32-byte SHA-256 hash key
+        // Browser Web Crypto API helper for AES decryption & GZIP decompression using 32-byte SHA-256 hash key
         async function decryptWithHash(base64Cipher, hashHex) {
             const keyBytes = new Uint8Array(hashHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
 
@@ -228,12 +228,32 @@
             const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
             const iv = new Uint8Array(16);
 
-            const decrypted = await window.crypto.subtle.decrypt(
+            const decryptedBuffer = await window.crypto.subtle.decrypt(
                 { name: "AES-CBC", iv: iv },
                 keyMaterial,
                 rawData
             );
-            return new TextDecoder().decode(decrypted);
+
+            const decryptedBytes = new Uint8Array(decryptedBuffer);
+
+            // Check if decrypted bytes start with GZIP magic bytes (0x1f, 0x8b)
+            if (decryptedBytes.length >= 2 && decryptedBytes[0] === 0x1f && decryptedBytes[1] === 0x8b) {
+                try {
+                    if (typeof DecompressionStream !== 'undefined') {
+                        const ds = new DecompressionStream('gzip');
+                        const writer = ds.writable.getWriter();
+                        writer.write(decryptedBytes);
+                        writer.close();
+                        const response = new Response(ds.readable);
+                        const decompressedBuffer = await response.arrayBuffer();
+                        return new TextDecoder().decode(decompressedBuffer);
+                    }
+                } catch (gzipErr) {
+                    // Fall back to plain text decoding if decompression fails
+                }
+            }
+
+            return new TextDecoder().decode(decryptedBuffer);
         }
 
         function groupLocationsIntoClusters(locations, thresholdMeters = 100) {

@@ -43,12 +43,18 @@ import javax.crypto.spec.SecretKeySpec;
 public class MainActivity extends Activity {
 
     private EditText inputRepo, inputToken, inputPasskey;
-    private Spinner spinnerInterval;
+    private Spinner spinnerPoints, spinnerSendInterval;
     private Switch switchService;
     private TextView textStatus;
 
     private static final String PREFS_NAME = "GPSPrefs";
     private static final int PERMISSION_REQUEST_CODE = 100;
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        updateServiceStatusText();
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -88,8 +94,21 @@ int pad = 40;
         inputPasskey.setGravity(Gravity.CENTER);
         layout.addView(inputPasskey);
 
-        spinnerInterval = new Spinner(this);
-        layout.addView(spinnerInterval);
+        TextView labelPoints = new TextView(this);
+        labelPoints.setText("GPS Points Sampled per Batch:");
+        labelPoints.setPadding(0, 10, 0, 5);
+        layout.addView(labelPoints);
+
+        spinnerPoints = new Spinner(this);
+        layout.addView(spinnerPoints);
+
+        TextView labelSend = new TextView(this);
+        labelSend.setText("Send Rate Interval:");
+        labelSend.setPadding(0, 10, 0, 5);
+        layout.addView(labelSend);
+
+        spinnerSendInterval = new Spinner(this);
+        layout.addView(spinnerSendInterval);
 
         Button btnSave = new Button(this);
         btnSave.setText("Save Configuration");
@@ -158,28 +177,44 @@ int pad = 40;
     }
 
     private void setupIntervalSpinner() {
-        String[] intervals = {"5 mins", "10 mins", "15 mins", "30 mins", "60 mins"};
-        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, intervals);
-        spinnerInterval.setAdapter(adapter);
+        String[] pointsOptions = {"1 point", "2 points", "3 points", "4 points", "5 points", "10 points"};
+        ArrayAdapter<String> adapterPoints = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, pointsOptions);
+        spinnerPoints.setAdapter(adapterPoints);
+
+        String[] sendIntervals = {"3 mins", "5 mins", "10 mins", "15 mins", "30 mins"};
+        ArrayAdapter<String> adapterSend = new ArrayAdapter<String>(this, android.R.layout.simple_spinner_dropdown_item, sendIntervals);
+        spinnerSendInterval.setAdapter(adapterSend);
     }
 
     private void savePreferences() {
         SharedPreferences prefs = getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
         
-        int selectedMinutes = 5;
-        switch (spinnerInterval.getSelectedItemPosition()) {
-            case 0: selectedMinutes = 5; break;
-            case 1: selectedMinutes = 10; break;
-            case 2: selectedMinutes = 15; break;
-            case 3: selectedMinutes = 30; break;
-            case 4: selectedMinutes = 60; break;
+        int pointsCount = 1;
+        switch (spinnerPoints.getSelectedItemPosition()) {
+            case 0: pointsCount = 1; break;
+            case 1: pointsCount = 2; break;
+            case 2: pointsCount = 3; break;
+            case 3: pointsCount = 4; break;
+            case 4: pointsCount = 5; break;
+            case 5: pointsCount = 10; break;
+        }
+
+        int sendRateMinutes = 5;
+        switch (spinnerSendInterval.getSelectedItemPosition()) {
+            case 0: sendRateMinutes = 3; break;
+            case 1: sendRateMinutes = 5; break;
+            case 2: sendRateMinutes = 10; break;
+            case 3: sendRateMinutes = 15; break;
+            case 4: sendRateMinutes = 30; break;
         }
 
         prefs.edit()
                 .putString("repo", inputRepo.getText().toString().trim())
                 .putString("token", inputToken.getText().toString().trim())
                 .putString("passkey", inputPasskey.getText().toString().trim())
-                .putInt("intervalMinutes", selectedMinutes)
+                .putInt("pointsCount", pointsCount)
+                .putInt("sendRateMinutes", sendRateMinutes)
+                .putBoolean("serviceEnabled", switchService.isChecked())
                 .apply();
     }
 
@@ -189,13 +224,49 @@ int pad = 40;
         inputToken.setText(prefs.getString("token", ""));
         inputPasskey.setText(prefs.getString("passkey", ""));
 
-        int minutes = prefs.getInt("intervalMinutes", 15);
-        int position = 2;
-        if (minutes == 5) position = 0;
-        else if (minutes == 10) position = 1;
-        else if (minutes == 30) position = 3;
-        else if (minutes == 60) position = 4;
-        spinnerInterval.setSelection(position);
+        int pointsCount = prefs.getInt("pointsCount", 1);
+        int posPoints = 0;
+        if (pointsCount == 1) posPoints = 0;
+        else if (pointsCount == 2) posPoints = 1;
+        else if (pointsCount == 3) posPoints = 2;
+        else if (pointsCount == 4) posPoints = 3;
+        else if (pointsCount == 5) posPoints = 4;
+        else if (pointsCount == 10) posPoints = 5;
+        spinnerPoints.setSelection(posPoints);
+
+        int sendRateMinutes = prefs.getInt("sendRateMinutes", 5);
+        int posSend = 1; // default 5 mins
+        if (sendRateMinutes == 3) posSend = 0;
+        else if (sendRateMinutes == 5) posSend = 1;
+        else if (sendRateMinutes == 10) posSend = 2;
+        else if (sendRateMinutes == 15) posSend = 3;
+        else if (sendRateMinutes == 30) posSend = 4;
+        spinnerSendInterval.setSelection(posSend);
+
+        boolean serviceEnabled = prefs.getBoolean("serviceEnabled", false);
+        switchService.setChecked(serviceEnabled);
+        updateServiceStatusText();
+    }
+
+    private boolean isLocationServiceRunning() {
+        android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+        if (am != null) {
+            for (android.app.ActivityManager.RunningServiceInfo service : am.getRunningServices(Integer.MAX_VALUE)) {
+                if (LocationService.class.getName().equals(service.service.getClassName())) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private void updateServiceStatusText() {
+        boolean isRunning = isLocationServiceRunning();
+        if (isRunning) {
+            textStatus.setText("Status: Background Service Running");
+        } else {
+            textStatus.setText("Status: Background Service Stopped");
+        }
     }
 
     private boolean checkAndRequestPermissions() {
@@ -383,7 +454,13 @@ int pad = 40;
         Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
         cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec);
         
-        byte[] encrypted = cipher.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(baos)) {
+            gzos.write(data.getBytes(StandardCharsets.UTF_8));
+        }
+        byte[] compressedBytes = baos.toByteArray();
+
+        byte[] encrypted = cipher.doFinal(compressedBytes);
         return Base64.encodeToString(encrypted, Base64.NO_WRAP);
     }
 
@@ -394,12 +471,12 @@ int pad = 40;
         } else {
             startService(serviceIntent);
         }
-        textStatus.setText("Status: Service Running (Idle)");
+        updateServiceStatusText();
     }
 
     private void stopLocationService() {
         Intent serviceIntent = new Intent(this, LocationService.class);
         stopService(serviceIntent);
-        textStatus.setText("Status: Service Stopped");
+        updateServiceStatusText();
     }
 }

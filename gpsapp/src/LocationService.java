@@ -44,7 +44,9 @@ public class LocationService extends Service implements LocationListener {
     private LocationManager locationManager;
     private Handler handler;
     private Runnable pingRunnable;
-    private long intervalMillis = 15 * 60 * 1000;
+    private long sampleIntervalMillis = 5 * 60 * 1000;
+    private int targetPointsCount = 1;
+    private int collectedCount = 0;
 
     @Override
     public void onCreate() {
@@ -72,7 +74,7 @@ public class LocationService extends Service implements LocationListener {
             @Override
             public void run() {
                 checkAndFetchLocation();
-                handler.postDelayed(this, intervalMillis);
+                handler.postDelayed(this, sampleIntervalMillis);
             }
         };
     }
@@ -80,8 +82,15 @@ public class LocationService extends Service implements LocationListener {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
-        int minutes = prefs.getInt("intervalMinutes", 15);
-        intervalMillis = minutes * 60L * 1000L;
+        int sendRateMinutes = prefs.getInt("sendRateMinutes", 5);
+        targetPointsCount = prefs.getInt("pointsCount", 1);
+        if (targetPointsCount < 1) targetPointsCount = 1;
+
+        double sampleMinutes = (double) sendRateMinutes / (double) targetPointsCount;
+        sampleIntervalMillis = (long) (sampleMinutes * 60.0 * 1000.0);
+        if (sampleIntervalMillis < 5000) sampleIntervalMillis = 5000;
+
+        collectedCount = 0;
 
         if (handler != null && pingRunnable != null) {
             handler.removeCallbacks(pingRunnable);
@@ -133,26 +142,61 @@ public class LocationService extends Service implements LocationListener {
         final double targetLat = bestLocation.getLatitude();
         final double targetLng = bestLocation.getLongitude();
 
+        collectedCount++;
+        final boolean shouldFlush = (collectedCount >= targetPointsCount);
+        if (shouldFlush) {
+            collectedCount = 0;
+        }
+
         new Thread(new Runnable() {
             @Override
             public void run() {
-                uploadEncryptedToGitHub(targetLat, targetLng);
+                recordAndUploadLocation(targetLat, targetLng, shouldFlush);
             }
         }).start();
     }
 
     @Override
     public void onLocationChanged(Location location) {
-        if (location != null) {
-            final double lat = location.getLatitude();
-            final double lng = location.getLongitude();
-            new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    uploadEncryptedToGitHub(lat, lng);
-                }
-            }).start();
+        // Single update received
+    }
+
+    private void recordAndUploadLocation(double lat, double lng, boolean flushToNetwork) {
+        SharedPreferences prefs = getSharedPreferences("GPSPrefs", Context.MODE_PRIVATE);
+        String repo = prefs.getString("repo", "");
+        String token = prefs.getString("token", "");
+        String passkey = prefs.getString("passkey", "");
+
+        if (repo.isEmpty() || token.isEmpty() || passkey.isEmpty()) return;
+
+        String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());
+        String rawData = "OK|" + lat + "," + lng + "|" + timestamp;
+
+        String newEncryptedPayload = null;
+        try {
+            newEncryptedPayload = encryptWithPasskey(rawData, passkey);
+        } catch (Exception e) {
+            e.printStackTrace();
+            return;
         }
+
+        // Retrieve existing offline pending queue
+        JSONArray pendingQueue = new JSONArray();
+        String cachedPendingJson = prefs.getString("pending_payloads", "[]");
+        try {
+            pendingQueue = new JSONArray(cachedPendingJson);
+        } catch (Exception ignored) {}
+
+        // Add new payload to pending queue
+        pendingQueue.put(newEncryptedPayload);
+
+        if (!flushToNetwork) {
+            // Store payload in local queue until send rate interval is reached
+            prefs.edit().putString("pending_payloads", pendingQueue.toString()).apply();
+            return;
+        }
+
+        uploadEncryptedToGitHub(lat, lng);
     }
 
     private void uploadEncryptedToGitHub(double lat, double lng) {
@@ -280,7 +324,13 @@ public class LocationService extends Service implements LocationListener {
         Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
         cipher.init(Cipher.ENCRYPT_MODE, keySpec, ivSpec);
 
-        byte[] encrypted = cipher.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        java.io.ByteArrayOutputStream baos = new java.io.ByteArrayOutputStream();
+        try (java.util.zip.GZIPOutputStream gzos = new java.util.zip.GZIPOutputStream(baos)) {
+            gzos.write(data.getBytes(StandardCharsets.UTF_8));
+        }
+        byte[] compressedBytes = baos.toByteArray();
+
+        byte[] encrypted = cipher.doFinal(compressedBytes);
         return Base64.encodeToString(encrypted, Base64.NO_WRAP);
     }
 
