@@ -305,9 +305,8 @@ int pad = 40;
     }
 
     private String encryptWithPasskey(String data, String passkey) throws Exception {
-        byte[] keyBytes = new byte[32];
-        byte[] rawKey = passkey.getBytes(StandardCharsets.UTF_8);
-        System.arraycopy(rawKey, 0, keyBytes, 0, Math.min(rawKey.length, keyBytes.length));
+        java.security.MessageDigest md = java.security.MessageDigest.getInstance("SHA-256");
+        byte[] keyBytes = md.digest(passkey.getBytes(StandardCharsets.UTF_8));
 
         SecretKeySpec keySpec = new SecretKeySpec(keyBytes, "AES");
         IvParameterSpec ivSpec = new IvParameterSpec(new byte[16]);

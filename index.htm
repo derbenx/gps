@@ -30,8 +30,8 @@
     <!-- Passkey Prompt Overlay -->
     <div id="lockScreen">
         <h3>Enter Passkey</h3>
-        <input type="password" id="passkeyInput" placeholder="Passkey">
-        <button onclick="unlockAndDecrypt()">Access Map</button>
+        <input type="password" id="passkeyInput" placeholder="Passkey" onkeydown="if(event.key==='Enter') handleLogin()">
+        <button onclick="handleLogin()">Access Map</button>
     </div>
 
     <div class="header">
@@ -61,63 +61,133 @@
         let pathPolylineGroup = null;
         let globalRawLocations = [];
         let globalClusters = [];
+        let lastEtag = null;
+        let lastModifiedHeader = null;
+        let autoRefreshInterval = null;
 
-        async function unlockAndDecrypt() {
+        window.addEventListener('DOMContentLoaded', async () => {
+            const cachedHash = sessionStorage.getItem('passcode_hash');
+            if (cachedHash) {
+                await unlockWithHash(cachedHash);
+            }
+        });
+
+        async function sha256Hex(str) {
+            const encoder = new TextEncoder();
+            const data = encoder.encode(str);
+            const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+            const hashArray = Array.from(new Uint8Array(hashBuffer));
+            return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        async function handleLogin() {
             const passkey = document.getElementById('passkeyInput').value;
             if (!passkey) return alert('bad pass');
+            const hashHex = await sha256Hex(passkey);
+            await unlockWithHash(hashHex);
+        }
 
+        async function unlockWithHash(hashHex) {
             try {
-                // Fetch encrypted location blob
-                const response = await fetch('location.json?t=' + Date.now());
-                if (!response.ok) throw new Error("Data not found");
-                const encryptedArray = await response.json();
-
-                let validLocations = [];
-
-                // Loop through stored encrypted entries
-                for (let cipherBase64 of encryptedArray) {
-                    try {
-                        let decryptedText = await decryptWithPasskey(cipherBase64, passkey);
-                        
-                        // Validate header check (exact "OK|")
-                        if (decryptedText && decryptedText.startsWith("OK|")) {
-                            let parts = decryptedText.substring(3).split('|');
-                            let coords = parts[0].split(',');
-                            let lat = parseFloat(coords[0]);
-                            let lng = parseFloat(coords[1]);
-                            let timestamp = parts[1] || "Unknown Time";
-                            
-                            if (!isNaN(lat) && !isNaN(lng)) {
-                                validLocations.push({
-                                    lat: lat,
-                                    lng: lng,
-                                    time: timestamp,
-                                    dateObj: parseDate(timestamp)
-                                });
-                            }
-                        }
-                    } catch (err) {
-                        // Decryption failed for this row - silently discard
-                    }
-                }
-
-                if (validLocations.length === 0) {
+                const success = await loadDataAndUpdateDashboard(hashHex, true);
+                if (!success) {
+                    sessionStorage.removeItem('passcode_hash');
+                    document.getElementById('lockScreen').style.display = 'flex';
+                    document.getElementById('appContent').style.display = 'none';
                     alert('bad pass');
                     return;
                 }
 
-                // Sort chronologically (oldest to newest)
-                validLocations.sort((a, b) => a.dateObj - b.dateObj);
-                globalRawLocations = validLocations;
+                // Cache hash on successful decryption
+                sessionStorage.setItem('passcode_hash', hashHex);
 
-                // Unlock UI and initialize map
+                // Unlock UI
                 document.getElementById('lockScreen').style.display = 'none';
                 document.getElementById('appContent').style.display = 'block';
-                initMapAndDashboard(validLocations);
+
+                // Start periodic HEAD request polling for file timestamp/header updates (every 60 sec)
+                startAutoRefreshPolling(hashHex);
 
             } catch (e) {
+                sessionStorage.removeItem('passcode_hash');
+                document.getElementById('lockScreen').style.display = 'flex';
+                document.getElementById('appContent').style.display = 'none';
                 alert('bad pass');
             }
+        }
+
+        async function loadDataAndUpdateDashboard(hashHex, forceFetch = false) {
+            // Check if file modified via HEAD request before full download if not forceFetch
+            if (!forceFetch) {
+                try {
+                    const headResp = await fetch('location.json?t=' + Date.now(), { method: 'HEAD' });
+                    const etag = headResp.headers.get('etag');
+                    const lastMod = headResp.headers.get('last-modified');
+
+                    if (etag && etag === lastEtag) return true; // No changes
+                    if (lastMod && lastMod === lastModifiedHeader) return true; // No changes
+                } catch (e) {
+                    // Fall back to full fetch on error
+                }
+            }
+
+            const response = await fetch('location.json?t=' + Date.now());
+            if (!response.ok) throw new Error("Data not found");
+
+            lastEtag = response.headers.get('etag');
+            lastModifiedHeader = response.headers.get('last-modified');
+
+            const encryptedArray = await response.json();
+            let validLocations = [];
+
+            for (let cipherBase64 of encryptedArray) {
+                try {
+                    let decryptedText = await decryptWithHash(cipherBase64, hashHex);
+
+                    if (decryptedText && decryptedText.startsWith("OK|")) {
+                        let parts = decryptedText.substring(3).split('|');
+                        let coords = parts[0].split(',');
+                        let lat = parseFloat(coords[0]);
+                        let lng = parseFloat(coords[1]);
+                        let timestamp = parts[1] || "Unknown Time";
+
+                        if (!isNaN(lat) && !isNaN(lng)) {
+                            validLocations.push({
+                                lat: lat,
+                                lng: lng,
+                                time: timestamp,
+                                dateObj: parseDate(timestamp)
+                            });
+                        }
+                    }
+                } catch (err) {
+                    // Decryption failed for this row - silently discard
+                }
+            }
+
+            if (validLocations.length === 0) {
+                return false;
+            }
+
+            validLocations.sort((a, b) => a.dateObj - b.dateObj);
+
+            const urlParams = new URLSearchParams(window.location.search);
+            const isAdmin = urlParams.get('admin') === '1';
+
+            let displayLocations = validLocations;
+            if (!isAdmin) {
+                displayLocations = validLocations.slice(-1);
+            }
+
+            initMapAndDashboard(displayLocations);
+            return true;
+        }
+
+        function startAutoRefreshPolling(hashHex) {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            autoRefreshInterval = setInterval(async () => {
+                await loadDataAndUpdateDashboard(hashHex, false);
+            }, 60000); // Poll HEAD request every 60 seconds
         }
 
         function parseDate(ts) {
@@ -140,13 +210,9 @@
             return R * c;
         }
 
-        // Browser Web Crypto API helper for AES decryption matching Java app
-        async function decryptWithPasskey(base64Cipher, passkey) {
-            const enc = new TextEncoder();
-
-            const keyBytes = new Uint8Array(32);
-            const passkeyEncoded = enc.encode(passkey);
-            keyBytes.set(passkeyEncoded.subarray(0, 32));
+        // Browser Web Crypto API helper for AES decryption using 32-byte SHA-256 hash key
+        async function decryptWithHash(base64Cipher, hashHex) {
+            const keyBytes = new Uint8Array(hashHex.match(/.{1,2}/g).map(byte => parseInt(byte, 16)));
 
             const keyMaterial = await window.crypto.subtle.importKey(
                 "raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]
@@ -235,6 +301,7 @@
         }
 
         function initMapAndDashboard(locations) {
+            globalRawLocations = locations;
             const clusters = groupLocationsIntoClusters(locations, 100);
             globalClusters = clusters;
 
@@ -250,6 +317,11 @@
                 mapInstance.setView([clusters[0].lat, clusters[0].lng], 14);
             }
 
+            if (markersMap) {
+                Object.values(markersMap).forEach(m => {
+                    if (mapInstance && m) mapInstance.removeLayer(m);
+                });
+            }
             markersMap = {};
 
             clusters.forEach((cluster, index) => {
