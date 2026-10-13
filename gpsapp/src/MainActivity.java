@@ -239,10 +239,16 @@ int pad = 40;
             }
         }
 
-        // Fallback to randomized coordinates around San Francisco if location unavailable
+        // If no real location fix is available, notify the user with 'no fix' popup and abort push
         if (lat == 0.0 && lng == 0.0) {
-            lat = 37.7749 + (Math.random() - 0.5) * 0.02;
-            lng = -122.4194 + (Math.random() - 0.5) * 0.02;
+            runOnUiThread(new Runnable() {
+                @Override
+                public void run() {
+                    Toast.makeText(MainActivity.this, "no fix", Toast.LENGTH_SHORT).show();
+                    textStatus.setText("Status: no fix");
+                }
+            });
+            return;
         }
 
         String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(new Date());

