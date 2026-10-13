@@ -37,10 +37,10 @@
     <script>
         async function unlockAndDecrypt() {
             const passkey = document.getElementById('passkeyInput').value;
-            if (!passkey) return alert('Enter a passkey');
+            if (!passkey) return alert('bad pass');
 
             try {
-                // Fetch encrypted location blob from GitHub Pages
+                // Fetch encrypted location blob
                 const response = await fetch('location.json?t=' + Date.now());
                 if (!response.ok) throw new Error("Data not found");
                 const encryptedArray = await response.json();
@@ -52,24 +52,29 @@
                     try {
                         let decryptedText = await decryptWithPasskey(cipherBase64, passkey);
                         
-                        // Validate header check ("OK|")
+                        // Validate header check (exact "OK|")
                         if (decryptedText && decryptedText.startsWith("OK|")) {
                             let parts = decryptedText.substring(3).split('|');
                             let coords = parts[0].split(',');
                             let lat = parseFloat(coords[0]);
                             let lng = parseFloat(coords[1]);
+                            let timestamp = parts[1] || "Unknown Time";
                             
                             if (!isNaN(lat) && !isNaN(lng)) {
-                                validLocations.push([lat, lng]);
+                                validLocations.push({
+                                    lat: lat,
+                                    lng: lng,
+                                    time: timestamp
+                                });
                             }
                         }
                     } catch (err) {
-                        // Decryption failed for this specific row (wrong passkey) - silently discard
+                        // Decryption failed for this specific row (wrong passkey or bad padding) - silently discard
                     }
                 }
 
                 if (validLocations.length === 0) {
-                    alert('Incorrect passkey or no valid records found.');
+                    alert('bad pass');
                     return;
                 }
 
@@ -79,42 +84,52 @@
                 initMap(validLocations);
 
             } catch (e) {
-                alert('Error loading data: ' + e.message);
+                alert('bad pass');
             }
         }
 
         // Browser Web Crypto API helper for AES decryption matching the Java app
-async function decryptWithPasskey(base64Cipher, passkey) {
-    const enc = new TextEncoder();
-    
-    // Match Java's exact 32-byte zero-padding key generation
-    const paddedKey = passkey.padEnd(32, '0').substring(0, 32);
-    const keyMaterial = await window.crypto.subtle.importKey(
-        "raw", enc.encode(paddedKey), { name: "AES-CBC" }, false, ["decrypt"]
-    );
-    
-    const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
-    
-    // Java uses a static 16-byte zero IV, so pass a 16-byte zero array and use all of rawData as ciphertext[cite: 1]
-    const iv = new Uint8Array(16);
+        async function decryptWithPasskey(base64Cipher, passkey) {
+            const enc = new TextEncoder();
 
-    const decrypted = await window.crypto.subtle.decrypt(
-        { name: "AES-CBC", iv: iv }, 
-        keyMaterial,
-        rawData
-    );
-    return new TextDecoder().decode(decrypted);
-}
+            // Match Java's exact byte array behavior: 32 bytes initialized with null bytes
+            const keyBytes = new Uint8Array(32);
+            const passkeyEncoded = enc.encode(passkey);
+            keyBytes.set(passkeyEncoded.subarray(0, 32));
+
+            const keyMaterial = await window.crypto.subtle.importKey(
+                "raw", keyBytes, { name: "AES-CBC" }, false, ["decrypt"]
+            );
+
+            const rawData = Uint8Array.from(atob(base64Cipher), c => c.charCodeAt(0));
+
+            // Java uses a static 16-byte zero IV
+            const iv = new Uint8Array(16);
+
+            const decrypted = await window.crypto.subtle.decrypt(
+                { name: "AES-CBC", iv: iv },
+                keyMaterial,
+                rawData
+            );
+            return new TextDecoder().decode(decrypted);
+        }
+
         function initMap(locations) {
-            var map = L.map('map').setView(locations[0], 15);
+            var map = L.map('map').setView([locations[0].lat, locations[0].lng], 15);
             L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
                 maxZoom: 19,
                 attribution: '&copy; OpenStreetMap contributors'
             }).addTo(map);
 
-            locations.forEach(function(coord, index) {
-                var marker = L.marker(coord).addTo(map);
-                if (index === 0) marker.bindPopup("<b>Latest Position</b>").openPopup();
+            locations.forEach(function(loc, index) {
+                var marker = L.marker([loc.lat, loc.lng]).addTo(map);
+                var popupText = "<b>Date/Time:</b> " + loc.time;
+                if (index === 0) {
+                    popupText = "<b>Latest Position</b><br>" + popupText;
+                    marker.bindPopup(popupText).openPopup();
+                } else {
+                    marker.bindPopup(popupText);
+                }
             });
         }
     </script>
