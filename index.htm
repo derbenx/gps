@@ -105,6 +105,10 @@
                 document.getElementById('lockScreen').style.display = 'none';
                 document.getElementById('appContent').style.display = 'block';
 
+                if (mapInstance) {
+                    setTimeout(() => mapInstance.invalidateSize(), 100);
+                }
+
                 // Start periodic HEAD request polling for file timestamp/header updates (every 60 sec)
                 startAutoRefreshPolling(hashHex);
 
@@ -316,6 +320,13 @@
             } else {
                 mapInstance.setView([clusters[0].lat, clusters[0].lng], 14);
             }
+
+            setTimeout(() => {
+                if (mapInstance) {
+                    mapInstance.invalidateSize();
+                    mapInstance.setView([clusters[0].lat, clusters[0].lng], 14);
+                }
+            }, 100);
 
             if (markersMap) {
                 Object.values(markersMap).forEach(m => {
